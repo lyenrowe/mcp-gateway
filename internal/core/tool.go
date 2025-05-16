@@ -4,51 +4,24 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/mcp-ecosystem/mcp-gateway/pkg/mcp"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+	"github.com/mcp-ecosystem/mcp-gateway/internal/mcp/session"
+	"github.com/mcp-ecosystem/mcp-gateway/pkg/mcp"
+
 	"github.com/mcp-ecosystem/mcp-gateway/internal/common/config"
 	"github.com/mcp-ecosystem/mcp-gateway/internal/template"
+	"go.uber.org/zap"
 )
-
-// renderTemplate renders a template with the given context
-func renderTemplate(tmpl string, ctx *template.Context) (string, error) {
-	renderer := template.NewRenderer()
-	return renderer.Render(tmpl, ctx)
-}
-
-// prepareTemplateContext prepares the template context with request and config data
-func prepareTemplateContext(args map[string]any, request *http.Request, serverCfg map[string]string) (*template.Context, error) {
-	tmplCtx := template.NewContext()
-	tmplCtx.Args = preprocessArgs(args)
-
-	// Process server config templates
-	for k, v := range serverCfg {
-		rendered, err := renderTemplate(v, tmplCtx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to render config template: %w", err)
-		}
-		serverCfg[k] = rendered
-	}
-	tmplCtx.Config = serverCfg
-
-	// Process request headers
-	for k, v := range request.Header {
-		if len(v) > 0 {
-			tmplCtx.Request.Headers[k] = v[0]
-		}
-	}
-
-	return tmplCtx, nil
-}
 
 // prepareRequest prepares the HTTP request with templates and arguments
 func prepareRequest(tool *config.ToolConfig, tmplCtx *template.Context) (*http.Request, error) {
 	// Process endpoint template
-	endpoint, err := renderTemplate(tool.Endpoint, tmplCtx)
+	endpoint, err := template.RenderTemplate(tool.Endpoint, tmplCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to render endpoint template: %w", err)
 	}
@@ -56,7 +29,7 @@ func prepareRequest(tool *config.ToolConfig, tmplCtx *template.Context) (*http.R
 	// Process request body template
 	var reqBody io.Reader
 	if tool.RequestBody != "" {
-		rendered, err := renderTemplate(tool.RequestBody, tmplCtx)
+		rendered, err := template.RenderTemplate(tool.RequestBody, tmplCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render request body template: %w", err)
 		}
@@ -70,7 +43,7 @@ func prepareRequest(tool *config.ToolConfig, tmplCtx *template.Context) (*http.R
 
 	// Process header templates
 	for k, v := range tool.Headers {
-		rendered, err := renderTemplate(v, tmplCtx)
+		rendered, err := template.RenderTemplate(v, tmplCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to render header template: %w", err)
 		}
@@ -127,83 +100,191 @@ func preprocessResponseData(data map[string]any) map[string]any {
 	return processed
 }
 
-// processResponse processes the HTTP response and applies response template if needed
-func processResponse(resp *http.Response, tool *config.ToolConfig, tmplCtx *template.Context) (string, error) {
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %w", err)
-	}
-	if tool.ResponseBody == "" {
-		return string(respBody), nil
-	}
+// executeHTTPTool executes a tool with the given arguments
+func (s *Server) executeHTTPTool(conn session.Connection, tool *config.ToolConfig, args map[string]any, request *http.Request, serverCfg map[string]string) (*mcp.CallToolResult, error) {
+	// Log tool execution at info level
+	s.logger.Info("executing HTTP tool",
+		zap.String("tool", tool.Name),
+		zap.String("method", tool.Method),
+		zap.String("session_id", conn.Meta().ID),
+		zap.String("remote_addr", request.RemoteAddr))
 
-	var respData map[string]any
-	if err := json.Unmarshal(respBody, &respData); err != nil {
-		// 非JSON格式的响应，忽略解析错误
-	}
-
-	// Preprocess response data to handle []any type
-	respData = preprocessResponseData(respData)
-	tmplCtx.Response.Data = respData
-	tmplCtx.Response.Body = string(respBody)
-
-	rendered, err := renderTemplate(tool.ResponseBody, tmplCtx)
-	if err != nil {
-		return "", fmt.Errorf("failed to render response body template: %w", err)
-	}
-	return rendered, nil
-}
-
-// executeTool executes a tool with the given arguments
-func (s *Server) executeTool(tool *config.ToolConfig, args map[string]any, request *http.Request, serverCfg map[string]string) (*mcp.CallToolResult, error) {
 	// Prepare template context
-	tmplCtx, err := prepareTemplateContext(args, request, serverCfg)
+	tmplCtx, err := template.PrepareTemplateContext(conn.Meta().Request, args, request, serverCfg)
 	if err != nil {
+		s.logger.Error("failed to prepare template context",
+			zap.String("tool", tool.Name),
+			zap.String("session_id", conn.Meta().ID),
+			zap.Error(err))
 		return nil, err
 	}
 
 	// Prepare HTTP request
 	req, err := prepareRequest(tool, tmplCtx)
 	if err != nil {
+		s.logger.Error("failed to prepare HTTP request",
+			zap.String("tool", tool.Name),
+			zap.String("session_id", conn.Meta().ID),
+			zap.Error(err))
 		return nil, err
 	}
+
+	// Log request details at debug level
+	s.logger.Debug("tool request details",
+		zap.String("tool", tool.Name),
+		zap.String("url", req.URL.String()),
+		zap.String("method", req.Method),
+		zap.Any("headers", req.Header))
 
 	// Process arguments
 	processArguments(req, tool, args)
 
 	// Execute request
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	cli := &http.Client{}
+	s.logger.Debug("sending HTTP request",
+		zap.String("tool", tool.Name),
+		zap.String("url", req.URL.String()),
+		zap.String("session_id", conn.Meta().ID))
+
+	resp, err := cli.Do(req)
 	if err != nil {
+		s.logger.Error("failed to execute HTTP request",
+			zap.String("tool", tool.Name),
+			zap.String("url", req.URL.String()),
+			zap.String("session_id", conn.Meta().ID),
+			zap.Error(err))
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Read response body for logging in case of error
+	respBodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		s.logger.Error("failed to read response body",
+			zap.String("tool", tool.Name),
+			zap.String("session_id", conn.Meta().ID),
+			zap.Int("status", resp.StatusCode),
+			zap.Error(err))
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Restore response body for further processing
+	resp.Body = io.NopCloser(bytes.NewBuffer(respBodyBytes))
+
+	// Log response status
+	s.logger.Debug("received HTTP response",
+		zap.String("tool", tool.Name),
+		zap.String("session_id", conn.Meta().ID),
+		zap.String("response_body", string(respBodyBytes)),
+		zap.Int("status", resp.StatusCode))
+
 	// Process response
 	callToolResult, err := s.toolRespHandler.Handle(resp, tool, tmplCtx)
 	if err != nil {
+		s.logger.Error("failed to process tool response",
+			zap.String("tool", tool.Name),
+			zap.String("session_id", conn.Meta().ID),
+			zap.Int("status", resp.StatusCode),
+			zap.Error(err))
 		return nil, err
 	}
+
+	s.logger.Info("tool execution completed successfully",
+		zap.String("tool", tool.Name),
+		zap.String("session_id", conn.Meta().ID),
+		zap.Int("status", resp.StatusCode))
+
 	return callToolResult, nil
 }
 
-func preprocessArgs(args map[string]any) map[string]any {
-	processed := make(map[string]any)
+func (s *Server) fetchHTTPToolList(conn session.Connection) ([]mcp.ToolSchema, error) {
+	s.logger.Debug("fetching HTTP tool list",
+		zap.String("session_id", conn.Meta().ID),
+		zap.String("prefix", conn.Meta().Prefix))
 
-	for k, v := range args {
-		switch val := v.(type) {
-		case []any:
-			ss, _ := json.Marshal(val)
-			processed[k] = string(ss)
-		case float64:
-			// If the float64 equals its integer conversion, it's an integer
-			if val == float64(int64(val)) {
-				processed[k] = int64(val)
-			} else {
-				processed[k] = val
-			}
-		default:
-			processed[k] = v
-		}
+	// Get http tools for this prefix
+	tools, ok := s.state.prefixToTools[conn.Meta().Prefix]
+	if !ok {
+		s.logger.Warn("no tools found for prefix",
+			zap.String("prefix", conn.Meta().Prefix),
+			zap.String("session_id", conn.Meta().ID))
+		tools = []mcp.ToolSchema{} // Return empty list if prefix not found
 	}
-	return processed
+
+	s.logger.Debug("fetched tool list",
+		zap.String("prefix", conn.Meta().Prefix),
+		zap.String("session_id", conn.Meta().ID),
+		zap.Int("tool_count", len(tools)))
+
+	return tools, nil
+}
+
+func (s *Server) invokeHTTPTool(c *gin.Context, req mcp.JSONRPCRequest, conn session.Connection, params mcp.CallToolParams) *mcp.CallToolResult {
+	// Log tool invocation at info level
+	s.logger.Info("invoking HTTP tool",
+		zap.String("tool", params.Name),
+		zap.String("session_id", conn.Meta().ID),
+		zap.String("remote_addr", c.Request.RemoteAddr))
+
+	// Find the tool in the precomputed map
+	tool, exists := s.state.toolMap[params.Name]
+	if !exists {
+		s.logger.Warn("tool not found",
+			zap.String("tool", params.Name),
+			zap.String("session_id", conn.Meta().ID),
+			zap.String("remote_addr", c.Request.RemoteAddr))
+		errMsg := "Tool not found"
+		s.sendProtocolError(c, req.Id, errMsg, http.StatusNotFound, mcp.ErrorCodeMethodNotFound)
+		return nil
+	}
+
+	// Convert arguments to map[string]any
+	var args map[string]any
+	if err := json.Unmarshal(params.Arguments, &args); err != nil {
+		s.logger.Error("invalid tool arguments",
+			zap.String("tool", params.Name),
+			zap.String("session_id", conn.Meta().ID),
+			zap.Error(err))
+		errMsg := "Invalid tool arguments"
+		s.sendProtocolError(c, req.Id, errMsg, http.StatusBadRequest, mcp.ErrorCodeInvalidParams)
+		return nil
+	}
+
+	// Log tool arguments at debug level
+	if s.logger.Core().Enabled(zap.DebugLevel) {
+		argsJSON, _ := json.Marshal(args)
+		s.logger.Debug("tool arguments",
+			zap.String("tool", params.Name),
+			zap.String("session_id", conn.Meta().ID),
+			zap.ByteString("arguments", argsJSON))
+	}
+
+	// Get server configuration
+	serverCfg, ok := s.state.prefixToServerConfig[conn.Meta().Prefix]
+	if !ok {
+		s.logger.Error("server configuration not found",
+			zap.String("tool", params.Name),
+			zap.String("prefix", conn.Meta().Prefix),
+			zap.String("session_id", conn.Meta().ID))
+		errMsg := "Server configuration not found"
+		s.sendProtocolError(c, req.Id, errMsg, http.StatusInternalServerError, mcp.ErrorCodeInternalError)
+		return nil
+	}
+
+	// Execute the tool
+	result, err := s.executeHTTPTool(conn, tool, args, c.Request, serverCfg.Config)
+	if err != nil {
+		s.logger.Error("tool execution failed",
+			zap.String("tool", params.Name),
+			zap.String("session_id", conn.Meta().ID),
+			zap.Error(err))
+		s.sendToolExecutionError(c, conn, req, err, true)
+		return nil
+	}
+
+	s.logger.Info("tool invocation completed successfully",
+		zap.String("tool", params.Name),
+		zap.String("session_id", conn.Meta().ID))
+
+	return result
 }

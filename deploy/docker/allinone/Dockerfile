@@ -44,23 +44,44 @@ FROM ubuntu:22.04
 
 # Set default timezone
 ENV TZ=UTC
+ENV DEBIAN_FRONTEND=noninteractive
 
+# Install essential packages and setup timezone
 RUN apt-get update && apt-get install -y \
     supervisor \
     nginx \
     curl \
     vim \
     tzdata \
+    python3 \
+    python3-pip \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo ${TZ} > /etc/timezone \
     && dpkg-reconfigure -f noninteractive tzdata
+
+# Install Node.js LTS
+RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g npm@latest
+
+# Install pipx
+ENV PIPX_HOME=/opt/pipx
+ENV PIPX_BIN_DIR=/opt/pipx/bin
+ENV PATH=$PIPX_BIN_DIR:$PATH
+RUN python3 -m pip install pipx && \
+    pipx ensurepath
+
+# Install uv
+RUN python3 -m pip install uv
 
 COPY deploy/docker/allinone/supervisord.conf /etc/supervisor/conf.d/
 COPY deploy/docker/allinone/nginx.conf /etc/nginx/nginx.conf
 RUN mkdir -p /app/data
 COPY configs/apiserver.yaml /etc/mcp-gateway/
 COPY configs/mcp-gateway.yaml /etc/mcp-gateway/
+COPY configs/i18n /app/configs/i18n/
 
 COPY --from=builder /app/bin/mcp-gateway /usr/local/bin/
 COPY --from=builder /app/bin/mock-user-svc /usr/local/bin/
