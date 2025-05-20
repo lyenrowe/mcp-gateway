@@ -1,4 +1,4 @@
-name: "proxy-mcp-exp"
+name: "mcp-server"
 tenant: "default"
 
 routers:
@@ -59,15 +59,12 @@ mcpServers:
       - "-y"
       - "@amap/amap-maps-mcp-server"
     env:
-      AMAP_MAPS_API_KEY: "{{ env AMAP_MAPS_API_KEY }}"
-    policy: "onStart"
+      AMAP_MAPS_API_KEY: "{{.Request.Headers.Apikey}}"
 
   - type: "sse"
     name: "mock-user-sse"
     url: "http://localhost:3000/mcp/user/sse"
-    policy: "onDemand"
 
-  - type: "streamable-http"  # unimplemented for now
+  - type: "streamable-http"
     name: "mock-user-mcp"
-    url: "http://localhost:3000/mcp/user/mcp"
-    policy: "onDemand"
+    url: "http://localhost:3000/mcp/user/mcp" 
