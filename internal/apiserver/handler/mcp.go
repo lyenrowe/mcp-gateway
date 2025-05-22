@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/mcp-ecosystem/mcp-gateway/internal/apiserver/database"
@@ -197,13 +198,8 @@ func (h *MCP) HandleMCPServerUpdate(c *gin.Context) {
 		return
 	}
 
-	// Replace the old configuration with the new one
-	for i, c := range configs {
-		if c.Name == name {
-			configs[i] = &cfg
-			break
-		}
-	}
+	// Merge the new configuration with existing configs
+	configs = config.MergeConfigs(configs, &cfg)
 
 	// Validate all configurations
 	if err := config.ValidateMCPConfigs(configs); err != nil {
@@ -409,9 +405,9 @@ func (h *MCP) HandleMCPServerCreate(c *gin.Context) {
 		h.logger.Warn("tenant permission check failed",
 			zap.String("tenant", cfg.Tenant),
 			zap.Error(err))
-		if err == i18n.ErrUnauthorized {
+		if errors.Is(err, i18n.ErrUnauthorized) {
 			i18n.RespondWithError(c, i18n.ErrUnauthorized)
-		} else if err == i18n.ErrorTenantPermissionError {
+		} else if errors.Is(err, i18n.ErrorTenantPermissionError) {
 			i18n.RespondWithError(c, i18n.ErrorTenantPermissionError)
 		} else {
 			i18n.RespondWithError(c, err)
@@ -486,7 +482,7 @@ func (h *MCP) HandleMCPServerDelete(c *gin.Context) {
 		zap.String("server_name", name))
 
 	// Check if server exists
-	_, err := h.store.Get(c.Request.Context(), name)
+	cfg, err := h.store.Get(c.Request.Context(), name)
 	if err != nil {
 		h.logger.Error("MCP server not found",
 			zap.String("server_name", name),
@@ -501,6 +497,14 @@ func (h *MCP) HandleMCPServerDelete(c *gin.Context) {
 			zap.String("server_name", name),
 			zap.Error(err))
 		i18n.RespondWithError(c, i18n.ErrInternalServer.WithParam("Reason", "Failed to delete MCP server: "+err.Error()))
+		return
+	}
+
+	// Send reload signal to gateway using notifier
+	cfg.DeletedAt = time.Now()
+	if err := h.notifier.NotifyUpdate(c.Request.Context(), cfg); err != nil {
+		h.logger.Error("failed to notify gateway", zap.Error(err))
+		i18n.RespondWithError(c, i18n.ErrInternalServer.WithParam("Reason", "Failed to notify gateway: "+err.Error()))
 		return
 	}
 
