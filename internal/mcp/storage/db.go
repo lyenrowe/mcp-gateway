@@ -116,9 +116,13 @@ func (s *DBStore) Get(_ context.Context, name string) (*config.MCPConfig, error)
 }
 
 // List implements Store.List
-func (s *DBStore) List(_ context.Context) ([]*config.MCPConfig, error) {
+func (s *DBStore) List(_ context.Context, includeDeleted ...bool) ([]*config.MCPConfig, error) {
 	var models []MCPConfig
-	err := s.db.Find(&models).Error
+	query := s.db
+	if len(includeDeleted) > 0 && includeDeleted[0] {
+		query = query.Unscoped()
+	}
+	err := query.Find(&models).Error
 	if err != nil {
 		return nil, err
 	}
@@ -223,12 +227,12 @@ func (s *DBStore) Delete(ctx context.Context, name string) error {
 			return err
 		}
 
-		// Delete the active version
+		// Soft delete the active version
 		if err := tx.Where("name = ?", name).Delete(&ActiveVersion{}).Error; err != nil {
 			return err
 		}
 
-		// Delete the main record
+		// Soft delete the main record
 		if err := tx.Where("name = ?", name).Delete(&MCPConfig{}).Error; err != nil {
 			return err
 		}
@@ -339,9 +343,28 @@ func (s *DBStore) SetActiveVersion(ctx context.Context, name string, version int
 			Servers:    versionModel.Servers,
 			Tools:      versionModel.Tools,
 			McpServers: versionModel.McpServers,
+			Hash:       versionModel.Hash,
 		}
 
 		if err := tx.Create(newVersion).Error; err != nil {
+			return err
+		}
+
+		// Update MCPConfig table with the target version's configuration
+		mcpConfig := &MCPConfig{
+			Name:       versionModel.Name,
+			Tenant:     versionModel.Tenant,
+			UpdatedAt:  time.Now(),
+			Routers:    versionModel.Routers,
+			Servers:    versionModel.Servers,
+			Tools:      versionModel.Tools,
+			McpServers: versionModel.McpServers,
+		}
+
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "name"}},
+			DoUpdates: clause.AssignmentColumns([]string{"tenant", "updated_at", "routers", "servers", "tools", "mcp_servers"}),
+		}).Create(mcpConfig).Error; err != nil {
 			return err
 		}
 

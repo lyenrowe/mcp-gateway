@@ -14,19 +14,20 @@ import (
 
 // MCPConfig represents the database model for MCPConfig
 type MCPConfig struct {
-	Name        string `gorm:"primaryKey; column:name"`
+	Name        string `gorm:"primaryKey; column:name; type:varchar(50)"`
 	Tenant      string `gorm:"column:tenant; default:''"`
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
-	Routers     string `gorm:"type:text; column:routers"`
-	Servers     string `gorm:"type:text; column:servers"`
-	Tools       string `gorm:"type:text; column:tools"`
-	McpServers  string `gorm:"type:text; column:mcp_servers"`
-	ID          string `gorm:"column:id; index"`
-	Description string `gorm:"type:text; column:description"`
-	Repository  string `gorm:"type:text; column:repository"`
-	Version     string `gorm:"column:version"`
-	IsPublished bool   `gorm:"column:is_published; default:false"`
+	Routers     string         `gorm:"type:text; column:routers"`
+	Servers     string         `gorm:"type:text; column:servers"`
+	Tools       string         `gorm:"type:text; column:tools"`
+	McpServers  string         `gorm:"type:text; column:mcp_servers"`
+	ID          string         `gorm:"column:id; index"`
+	Description string         `gorm:"type:text; column:description"`
+	Repository  string         `gorm:"type:text; column:repository"`
+	Version     string         `gorm:"column:version"`
+	IsPublished bool           `gorm:"column:is_published; default:false"`
+	DeletedAt   gorm.DeletedAt `gorm:"index"`
 }
 
 // ToMCPConfig converts the database model to MCPConfig
@@ -62,7 +63,7 @@ func (m *MCPConfig) ToMCPConfig() (*config.MCPConfig, error) {
 			return nil, err
 		}
 	}
-	
+
 	if len(m.Repository) > 0 {
 		var repo config.RepositoryConfig
 		if err := json.Unmarshal([]byte(m.Repository), &repo); err != nil {
@@ -95,7 +96,7 @@ func FromMCPConfig(cfg *config.MCPConfig) (*MCPConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var repository string
 	if cfg.Repository != nil {
 		repoBytes, err := json.Marshal(cfg.Repository)
@@ -143,7 +144,7 @@ func (m *MCPConfig) BeforeUpdate(_ *gorm.DB) error {
 // ActiveVersion represents the currently active version of an MCP configuration
 type ActiveVersion struct {
 	ID        uint      `gorm:"primarykey"`
-	Name      string    `gorm:"type:varchar(255);uniqueIndex;not null"`
+	Name      string    `gorm:"type:varchar(50);uniqueIndex;not null"`
 	Version   int       `gorm:"not null"`
 	UpdatedAt time.Time `gorm:"not null"`
 }
@@ -151,7 +152,7 @@ type ActiveVersion struct {
 // MCPConfigVersion represents the database model for MCPConfigVersion
 type MCPConfigVersion struct {
 	ID         int64           `gorm:"primaryKey;autoIncrement"`
-	Name       string          `gorm:"column:name;index:idx_name_tenant_version,uniqueIndex"`
+	Name       string          `gorm:"column:name;type:varchar(50);index:idx_name_tenant_version,uniqueIndex"`
 	Tenant     string          `gorm:"column:tenant;default:'';index:idx_name_tenant_version,uniqueIndex"`
 	Version    int             `gorm:"column:version;index:idx_name_tenant_version,uniqueIndex"`
 	ActionType cnst.ActionType `gorm:"column:action_type;not null"` // Create, Update, Delete, Revert
@@ -162,6 +163,7 @@ type MCPConfigVersion struct {
 	Tools      string          `gorm:"type:text;column:tools"`
 	McpServers string          `gorm:"type:text;column:mcp_servers"`
 	Hash       string          `gorm:"column:hash;not null"` // hash of the configuration content
+	DeletedAt  gorm.DeletedAt  `gorm:"index"`
 }
 
 // ToMCPConfig converts the database model to MCPConfig
@@ -199,6 +201,20 @@ func (m *MCPConfigVersion) ToMCPConfig() (*config.MCPConfig, error) {
 
 // FromMCPConfigVersion converts MCPConfig to database model
 func FromMCPConfigVersion(cfg *config.MCPConfig, version int, createdBy string, actionType cnst.ActionType) (*MCPConfigVersion, error) {
+	// Initialize empty slices if nil
+	if cfg.Routers == nil {
+		cfg.Routers = []config.RouterConfig{}
+	}
+	if cfg.Servers == nil {
+		cfg.Servers = []config.ServerConfig{}
+	}
+	if cfg.Tools == nil {
+		cfg.Tools = []config.ToolConfig{}
+	}
+	if cfg.McpServers == nil {
+		cfg.McpServers = []config.MCPServerConfig{}
+	}
+
 	routers, err := json.Marshal(cfg.Routers)
 	if err != nil {
 		return nil, err

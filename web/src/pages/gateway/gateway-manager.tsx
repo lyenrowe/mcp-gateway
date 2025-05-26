@@ -33,6 +33,7 @@ import yaml from 'js-yaml';
 import {configureMonacoYaml} from 'monaco-yaml';
 import React from 'react';
 import {useTranslation} from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 import {
   createMCPServer,
@@ -90,6 +91,7 @@ interface Tenant {
 }
 
 interface YAMLConfig {
+  name?: string;
   mcpServers?: Record<string, unknown>;
   tools?: Record<string, unknown>;
   servers?: Record<string, unknown>;
@@ -99,6 +101,7 @@ interface YAMLConfig {
 
 export function GatewayManager() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const {isOpen, onOpen, onOpenChange} = useDisclosure();
   const {isOpen: isCreateOpen, onOpen: onCreateOpen, onOpenChange: onCreateOpenChange} = useDisclosure();
   const {isOpen: isImportOpen, onOpen: onImportOpen, onOpenChange: onImportOpenChange} = useDisclosure();
@@ -257,6 +260,12 @@ export function GatewayManager() {
       // Parse YAML to check format and handle null values
       const parsedConfig = yaml.load(editConfig) as YAMLConfig;
       
+      // Validate name length
+      if (parsedConfig.name && typeof parsedConfig.name === 'string' && parsedConfig.name.length > 50) {
+        toast.error(t('gateway.name_length_error'));
+        return;
+      }
+      
       // Remove null fields from the config
       const fieldsToCheck = ['mcpServers', 'tools', 'servers', 'routers'];
       fieldsToCheck.forEach(field => {
@@ -351,6 +360,12 @@ export function GatewayManager() {
     try {
       // Parse YAML to check format and handle null values
       const parsedConfig = yaml.load(newConfig) as YAMLConfig;
+      
+      // Validate name length
+      if (parsedConfig.name && typeof parsedConfig.name === 'string' && parsedConfig.name.length > 50) {
+        toast.error(t('gateway.name_length_error'));
+        return;
+      }
       
       // Remove null fields from the config
       const fieldsToCheck = ['mcpServers', 'tools', 'servers', 'routers'];
@@ -1125,7 +1140,17 @@ export function GatewayManager() {
                     </Button>
                   </TableCell>
                   <TableCell>
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="light"
+                        size="sm"
+                        startContent={<Icon icon="lucide:history" />}
+                        onPress={() => {
+                          navigate(`/config-versions?name=${server.name}`);
+                        }}
+                      >
+                        {t('mcp.configVersions.title')}
+                      </Button>
                       <Button
                         isIconOnly
                         color="primary"
